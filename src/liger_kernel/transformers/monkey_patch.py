@@ -3575,13 +3575,20 @@ def _patch_lfm2_base_model(
 def apply_liger_kernel_to_lfm2(
     rope: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: Optional[bool] = None,
     rms_norm: bool = True,
     swiglu: bool = True,
     short_conv: bool = True,
     model: PreTrainedModel = None,
 ) -> None:
-    """Apply Liger kernels to Hugging Face LFM2 models."""
+    """Apply Liger kernels to Hugging Face LFM2 models.
+
+    Fused linear cross entropy defaults to enabled on ROCm and disabled on
+    CUDA, where native compiled chunked loss is faster. Pass an explicit bool
+    to override the backend default.
+    """
+    if fused_linear_cross_entropy is None:
+        fused_linear_cross_entropy = is_hip()
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
@@ -3615,7 +3622,7 @@ def apply_liger_kernel_to_lfm2(
 def apply_liger_kernel_to_lfm2_moe(
     rope: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: Optional[bool] = None,
     rms_norm: bool = True,
     swiglu: bool = True,
     fused_moe: bool = True,
@@ -3624,6 +3631,8 @@ def apply_liger_kernel_to_lfm2_moe(
     model: PreTrainedModel = None,
 ) -> None:
     """Apply Liger kernels to Hugging Face LFM2-MoE models."""
+    if fused_linear_cross_entropy is None:
+        fused_linear_cross_entropy = is_hip()
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
@@ -3672,7 +3681,7 @@ def apply_liger_kernel_to_lfm2_moe(
 def apply_liger_kernel_to_lfm2_vl(
     rope: bool = True,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: Optional[bool] = None,
     layer_norm: Optional[bool] = None,
     rms_norm: bool = True,
     swiglu: bool = True,
@@ -3681,14 +3690,17 @@ def apply_liger_kernel_to_lfm2_vl(
 ) -> None:
     """Apply Liger kernels to LFM2-VL's LFM2 decoder and SigLIP2 tower.
 
-    LayerNorm defaults to disabled on ROCm, where PyTorch's implementation is
-    faster for the SigLIP2 shapes, and enabled on other accelerators.
+    LayerNorm defaults to disabled because PyTorch's implementation is faster
+    for the SigLIP2 shapes on both CUDA and ROCm. Pass ``layer_norm=True`` to
+    opt in explicitly.
     """
+    if fused_linear_cross_entropy is None:
+        fused_linear_cross_entropy = is_hip()
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
     if layer_norm is None:
-        layer_norm = not is_hip()
+        layer_norm = False
 
     from transformers.models.lfm2_vl import modeling_lfm2_vl
     from transformers.models.lfm2_vl.modeling_lfm2_vl import Lfm2VlForConditionalGeneration

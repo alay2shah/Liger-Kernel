@@ -3,21 +3,19 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from liger_kernel.transformers import swiglu
 from liger_kernel.transformers.monkey_patch import _patch_swiglu_module
 from liger_kernel.transformers.swiglu import LigerExperts
 from liger_kernel.transformers.swiglu import LigerLfm2MoeExperts
 
 
 @pytest.mark.parametrize(
-    ("tokens", "rocm", "expected"),
+    ("tokens", "expected"),
     [
-        (256, True, "liger"),
-        (512, True, "grouped_mm"),
-        (512, False, "liger"),
+        (256, "liger"),
+        (512, "grouped_mm"),
     ],
 )
-def test_lfm2_moe_rocm_shape_dispatch(monkeypatch, tokens, rocm, expected):
+def test_lfm2_moe_shape_dispatch(monkeypatch, tokens, expected):
     from transformers.integrations import moe
 
     config = SimpleNamespace(
@@ -34,7 +32,6 @@ def test_lfm2_moe_rocm_shape_dispatch(monkeypatch, tokens, rocm, expected):
     top_k_weights = torch.full((tokens, 2), 0.5)
     calls = []
 
-    monkeypatch.setattr(swiglu, "is_hip", lambda: rocm)
     monkeypatch.setattr(torch.nn.functional, "grouped_mm", object(), raising=False)
 
     def fake_grouped_mm(module, hidden, indices, weights):
@@ -62,20 +59,26 @@ def test_lfm2_moe_rocm_shape_dispatch(monkeypatch, tokens, rocm, expected):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA or ROCm required")
-def test_lfm2_moe_grouped_mm_dispatch_forward_backward(monkeypatch):
+def test_lfm2_moe_grouped_mm_dispatch_forward_backward():
     from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeExperts
 
     grouped_mm_available = hasattr(torch.nn.functional, "grouped_mm") or hasattr(torch, "_grouped_mm")
     if not grouped_mm_available:
         pytest.skip("PyTorch grouped MM is unavailable")
 
-    config = SimpleNamespace(hidden_size=64, moe_intermediate_size=32, num_experts=4)
+    config = SimpleNamespace(
+        hidden_size=64,
+        moe_intermediate_size=32,
+        num_experts=4,
+        _experts_implementation=None,
+    )
     reference = Lfm2MoeExperts(config).to(device="cuda", dtype=torch.bfloat16)
     actual = Lfm2MoeExperts(config).to(device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        reference.gate_up_proj.normal_(std=0.02)
+        reference.down_proj.normal_(std=0.02)
     actual.load_state_dict(reference.state_dict())
     _patch_swiglu_module(actual, LigerLfm2MoeExperts)
-    monkeypatch.setattr(swiglu, "is_hip", lambda: True)
-
     torch.manual_seed(42)
     hidden_reference = torch.randn(512, config.hidden_size, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     hidden_actual = hidden_reference.detach().clone().requires_grad_(True)

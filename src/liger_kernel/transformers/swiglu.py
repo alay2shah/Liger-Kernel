@@ -3,7 +3,6 @@ import torch.nn as nn
 
 from liger_kernel.ops import LigerFusedMoEFunction
 from liger_kernel.ops import LigerSiLUMulFunction
-from liger_kernel.ops.utils import is_hip
 
 
 class LigerSwiGLUMLP(nn.Module):
@@ -107,13 +106,14 @@ class LigerLfm2SwiGLUMLP(nn.Module):
         return self.w2(LigerSiLUMulFunction.apply(self.w1(x), self.w3(x)))
 
 
-# MI325X sweeps of the 8B-A1B and 24B-A2B shapes put the crossover
-# near 256 routed rows per expert; below it, the fused Triton path is faster.
-_ROCM_GROUPED_MM_MIN_ROWS_PER_EXPERT = 256
+# MI325X and H100 sweeps of the 8B-A1B and 24B-A2B shapes put the
+# large-workload crossover near 256 routed rows per expert. Below it,
+# preserve the portable fused Triton path to avoid small-batch regressions.
+_GROUPED_MM_MIN_ROWS_PER_EXPERT = 256
 
 
 class LigerLfm2MoeExperts(LigerExperts):
-    """LFM2-MoE experts with shape-aware ROCm grouped-MM dispatch."""
+    """LFM2-MoE experts with workload-aware grouped-MM dispatch."""
 
     def __init__(self, config):
         nn.Module.__init__(self)
@@ -132,24 +132,23 @@ class LigerLfm2MoeExperts(LigerExperts):
         return self.act_fn(gate) * up
 
     def forward(self, hidden_states, top_k_index, top_k_weights):
-        if is_hip():
-            grouped_mm_available = hasattr(torch.nn.functional, "grouped_mm") or hasattr(torch, "_grouped_mm")
-            if grouped_mm_available:
-                tokens = hidden_states.numel() // self.hidden_dim
-                top_k = top_k_index.shape[-1]
-                enough_work_per_expert = tokens * top_k >= self.num_experts * _ROCM_GROUPED_MM_MIN_ROWS_PER_EXPERT
-                if enough_work_per_expert:
-                    try:
-                        from transformers.integrations.moe import grouped_mm_experts_forward
-                    except ImportError:
-                        pass
-                    else:
-                        orig_shape = hidden_states.shape
-                        x = hidden_states.view(-1, self.hidden_dim)
-                        out = grouped_mm_experts_forward(
-                            self, x, top_k_index.view(x.shape[0], -1), top_k_weights.view(x.shape[0], -1)
-                        )
-                        return out.view(orig_shape)
+        grouped_mm_available = hasattr(torch.nn.functional, "grouped_mm") or hasattr(torch, "_grouped_mm")
+        if grouped_mm_available:
+            tokens = hidden_states.numel() // self.hidden_dim
+            top_k = top_k_index.shape[-1]
+            enough_work_per_expert = tokens * top_k >= self.num_experts * _GROUPED_MM_MIN_ROWS_PER_EXPERT
+            if enough_work_per_expert:
+                try:
+                    from transformers.integrations.moe import grouped_mm_experts_forward
+                except ImportError:
+                    pass
+                else:
+                    orig_shape = hidden_states.shape
+                    x = hidden_states.view(-1, self.hidden_dim)
+                    out = grouped_mm_experts_forward(
+                        self, x, top_k_index.view(x.shape[0], -1), top_k_weights.view(x.shape[0], -1)
+                    )
+                    return out.view(orig_shape)
         return LigerExperts.forward(self, hidden_states, top_k_index, top_k_weights)
 
 
