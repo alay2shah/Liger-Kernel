@@ -7,9 +7,12 @@ import torch
 from transformers.cache_utils import Cache
 from transformers.utils import can_return_tuple
 
+from liger_kernel.ops.utils import is_hip
 from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss
 from liger_kernel.transformers.model.loss_utils import unpack_cross_entropy_result
 from liger_kernel.transformers.model.output_classes import LigerLfm2VlCausalLMOutputWithPast
+
+_LFM2_HIP_MAX_LOGITS_CHUNK_BYTES = 128 * 1024 * 1024
 
 
 @can_return_tuple
@@ -66,6 +69,7 @@ def lce_forward(
             labels=labels,
             shift_labels=shift_labels,
             hidden_size=self.config.text_config.hidden_size,
+            max_logits_chunk_bytes=_LFM2_HIP_MAX_LOGITS_CHUNK_BYTES if is_hip() else None,
             **kwargs,
         )
         loss, _, token_accuracy, predicted_tokens = unpack_cross_entropy_result(result)

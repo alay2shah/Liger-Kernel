@@ -94,6 +94,7 @@ def liger_fused_linear_cross_entropy(
     use_token_scaling: bool = False,
     return_token_accuracy: bool = False,
     return_predicted_tokens: bool = False,
+    max_logits_chunk_bytes: Optional[int] = None,
 ):
     loss, z_loss, token_accuracy, predicted_tokens = LigerFusedLinearCrossEntropyFunction.apply(
         input,
@@ -111,6 +112,7 @@ def liger_fused_linear_cross_entropy(
         use_token_scaling,
         return_token_accuracy,
         return_predicted_tokens,
+        max_logits_chunk_bytes,
     )
 
     if not return_z_loss and not return_token_accuracy and not return_predicted_tokens:

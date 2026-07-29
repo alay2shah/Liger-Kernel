@@ -2,6 +2,17 @@ import torch
 import triton
 import triton.language as tl
 
+from liger_kernel.utils import infer_device_arch
+
+
+def _short_conv_weight_backward_config(batch_tokens):
+    if infer_device_arch() == "hopper":
+        if batch_tokens >= 32768:
+            return 64, 2, 2
+        if batch_tokens >= 16384:
+            return 128, 4, 2
+    return 256, None, None
+
 
 @triton.jit
 def _short_conv_forward(
@@ -215,7 +226,13 @@ class LigerLfm2ShortConvFunction(torch.autograd.Function):
         )
 
         batch_tokens = batch_size * seq_len
-        n_chunks = triton.cdiv(batch_tokens, 256)
+        # Hopper benefits from finer-grained long-sequence weight reductions:
+        # the additional partials expose more parallel work and reduce the
+        # dominant backward latency. Keep every other architecture on the
+        # existing 256-token reduction to preserve ROCm and portable behavior.
+        weight_block, weight_warps, weight_stages = _short_conv_weight_backward_config(batch_tokens)
+        use_hopper_weight_config = weight_warps is not None
+        n_chunks = triton.cdiv(batch_tokens, weight_block)
         partial_shape = (hidden_size * kernel_size, n_chunks)
         weight_partials = torch.empty(partial_shape, dtype=torch.float32, device=bcx.device)
         bias_partials = (
@@ -237,7 +254,8 @@ class LigerLfm2ShortConvFunction(torch.autograd.Function):
             bcx.stride(2),
             K=kernel_size,
             HAS_BIAS=ctx.has_bias,
-            BLOCK=256,
+            BLOCK=weight_block,
+            **({"num_warps": weight_warps, "num_stages": weight_stages} if use_hopper_weight_config else {}),
         )
         grad_weight = weight_partials.sum(1).reshape(hidden_size, 1, kernel_size).to(weight.dtype)
         grad_bias = None

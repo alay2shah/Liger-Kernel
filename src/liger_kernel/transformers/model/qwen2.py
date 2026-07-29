@@ -60,6 +60,7 @@ def lce_forward(
     "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
     ```"""
 
+    max_logits_chunk_bytes = kwargs.pop("max_logits_chunk_bytes", None)
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
     output_hidden_states = (
         output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -107,6 +108,7 @@ def lce_forward(
             labels=labels,
             shift_labels=shift_labels,
             hidden_size=self.config.hidden_size,
+            max_logits_chunk_bytes=max_logits_chunk_bytes,
             **kwargs,
         )
         loss, _, token_accuracy, predicted_tokens = unpack_cross_entropy_result(result)

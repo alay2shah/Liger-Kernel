@@ -16,7 +16,6 @@ from liger_kernel.utils import infer_device
 MAX_FUSED_SIZE = 2048 if infer_device() == "npu" else 65536 // 2
 _TORCH_VERSION = Version(torch.__version__.split("+")[0])
 _ADDMM_SUPPORTS_OUT_DTYPE = _TORCH_VERSION >= Version("2.8.0")
-_HIP_MAX_LOGITS_CHUNK_BYTES = 128 * 1024 * 1024
 
 
 def fused_linear_cross_entropy_forward(
@@ -35,6 +34,7 @@ def fused_linear_cross_entropy_forward(
     use_token_scaling=False,
     return_token_accuracy=False,
     return_predicted_tokens=False,
+    max_logits_chunk_bytes=None,
 ):
     assert isinstance(return_z_loss, bool), f"return_z_loss must be True or False. Got: {return_z_loss}"
     assert isinstance(return_token_accuracy, bool), (
@@ -59,13 +59,11 @@ def fused_linear_cross_entropy_forward(
 
     inc_factor = triton.cdiv(V, H)  # (V + H - 1) // H
     chunk_size = triton.next_power_of_2(triton.cdiv(BT, inc_factor))  # (BT + inc_factor - 1) // inc_factor
-    if is_hip() and H >= 1024:
-        # Very small M dimensions underutilize ROCm GEMMs. Use up to 128 MiB of
-        # temporary logits for large hidden states to increase arithmetic
-        # intensity while retaining the main memory benefit of not
-        # materializing all BT x V logits. Preserve the existing chunking for
-        # smaller models, where changing accumulation order can be significant.
-        max_chunk_rows = _HIP_MAX_LOGITS_CHUNK_BYTES // (V * _input.element_size())
+    if max_logits_chunk_bytes is not None and H >= 1024:
+        # Model integrations may opt into a larger transient logits budget when
+        # their measured GEMM shapes otherwise underutilize the target backend.
+        # The default remains the portable, memory-derived chunking policy.
+        max_chunk_rows = max_logits_chunk_bytes // (V * _input.element_size())
         if max_chunk_rows > 0:
             performance_chunk_size = 1 << (max_chunk_rows.bit_length() - 1)
             chunk_size = min(BT, max(chunk_size, performance_chunk_size))
@@ -347,6 +345,7 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
         use_token_scaling: bool = False,
         return_token_accuracy: bool = False,
         return_predicted_tokens: bool = False,
+        max_logits_chunk_bytes=None,
     ):
         """
         Fusing the last linear layer with cross-entropy loss
@@ -391,6 +390,7 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
                 use_token_scaling=use_token_scaling,
                 return_token_accuracy=return_token_accuracy,
                 return_predicted_tokens=return_predicted_tokens,
+                max_logits_chunk_bytes=max_logits_chunk_bytes,
             )
         )
         # downcast to dtype and store for backward
@@ -433,4 +433,5 @@ class LigerFusedLinearCrossEntropyFunction(torch.autograd.Function):
             None,  # use_token_scaling
             None,  # return_token_accuracy
             None,  # return_predicted_tokens
+            None,  # max_logits_chunk_bytes
         )

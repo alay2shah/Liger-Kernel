@@ -23,6 +23,7 @@ from liger_kernel.transformers.model.falcon_h1 import lce_forward as falcon_h1_l
 from liger_kernel.transformers.model.gemma import lce_forward as gemma_lce_forward
 from liger_kernel.transformers.model.gemma2 import lce_forward as gemma2_lce_forward
 from liger_kernel.transformers.model.gpt_oss import lce_forward as gpt_oss_lce_forward
+from liger_kernel.transformers.model.lfm2 import lce_forward as lfm2_lce_forward
 from liger_kernel.transformers.model.llama import lce_forward as llama_lce_forward
 from liger_kernel.transformers.model.llava import lce_forward as llava_lce_forward
 from liger_kernel.transformers.model.ministral import lce_forward as ministral_lce_forward
@@ -3610,9 +3611,9 @@ def apply_liger_kernel_to_lfm2(
         nn.functional.cross_entropy = liger_cross_entropy
     if fused_linear_cross_entropy:
         if model is not None:
-            model.forward = MethodType(qwen2_lce_forward, model)
+            model.forward = MethodType(lfm2_lce_forward, model)
         else:
-            modeling_lfm2.Lfm2ForCausalLM.forward = qwen2_lce_forward
+            modeling_lfm2.Lfm2ForCausalLM.forward = lfm2_lce_forward
 
     if model is not None:
         base_model: Lfm2Model = getattr(model, model.base_model_prefix, model)
@@ -3658,9 +3659,9 @@ def apply_liger_kernel_to_lfm2_moe(
         nn.functional.cross_entropy = liger_cross_entropy
     if fused_linear_cross_entropy:
         if model is not None:
-            model.forward = MethodType(qwen2_lce_forward, model)
+            model.forward = MethodType(lfm2_lce_forward, model)
         else:
-            modeling_lfm2_moe.Lfm2MoeForCausalLM.forward = qwen2_lce_forward
+            modeling_lfm2_moe.Lfm2MoeForCausalLM.forward = lfm2_lce_forward
 
     if model is not None:
         base_model: Lfm2MoeModel = getattr(model, model.base_model_prefix, model)

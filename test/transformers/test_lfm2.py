@@ -1,16 +1,18 @@
 import inspect
 
 import pytest
+import torch
 
 from liger_kernel.ops.utils import is_hip
 from liger_kernel.transformers.auto_model import AutoLigerKernelForCausalLM
 from liger_kernel.transformers.lfm2_moe_router import liger_lfm2_moe_route_tokens_to_experts
 from liger_kernel.transformers.lfm2_short_conv import liger_lfm2_short_conv_forward
-from liger_kernel.transformers.model.qwen2 import lce_forward as lfm2_lce_forward
+from liger_kernel.transformers.model.lfm2 import lce_forward as lfm2_lce_forward
 from liger_kernel.transformers.monkey_patch import _apply_liger_kernel_to_instance
 from liger_kernel.transformers.rms_norm import LigerRMSNorm
 from liger_kernel.transformers.swiglu import LigerLfm2MoeExperts
 from liger_kernel.transformers.swiglu import LigerLfm2SwiGLUMLP
+from liger_kernel.utils import infer_device
 
 
 def _has_module(name):
@@ -24,6 +26,7 @@ def _has_module(name):
 HAS_LFM2 = _has_module("transformers.models.lfm2.modeling_lfm2")
 HAS_LFM2_MOE = _has_module("transformers.models.lfm2_moe.modeling_lfm2_moe")
 HAS_LFM2_VL = _has_module("transformers.models.lfm2_vl.modeling_lfm2_vl")
+device = infer_device()
 
 
 def _lfm2_config(**overrides):
@@ -178,9 +181,7 @@ def test_apply_liger_kernel_to_lfm2_vl_instance(layer_norm, expected_liger_layer
         (True, False, False),
     ],
 )
-def test_lfm2_fused_linear_cross_entropy_backend_default(
-    monkeypatch, hip, fused_linear_cross_entropy, expect_liger
-):
+def test_lfm2_fused_linear_cross_entropy_backend_default(monkeypatch, hip, fused_linear_cross_entropy, expect_liger):
     from transformers.models.lfm2.modeling_lfm2 import Lfm2ForCausalLM
 
     from liger_kernel.transformers import monkey_patch
@@ -195,6 +196,48 @@ def test_lfm2_fused_linear_cross_entropy_backend_default(
 
     expected_forward = inspect.getsource(lfm2_lce_forward) if expect_liger else original_forward
     assert inspect.getsource(model.forward) == expected_forward
+
+
+@pytest.mark.parametrize(
+    ("hip", "expected_chunk_bytes"),
+    [
+        (False, None),
+        (True, 128 * 1024 * 1024),
+    ],
+)
+def test_lfm2_fused_linear_cross_entropy_chunk_policy(monkeypatch, hip, expected_chunk_bytes):
+    from liger_kernel.transformers.model import lfm2
+
+    captured_kwargs = {}
+
+    def fake_qwen2_lce_forward(self, *args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(lfm2, "is_hip", lambda: hip)
+    monkeypatch.setattr(lfm2, "qwen2_lce_forward", fake_qwen2_lce_forward)
+
+    lfm2.lce_forward(object())
+
+    assert captured_kwargs.get("max_logits_chunk_bytes") == expected_chunk_bytes
+
+
+@pytest.mark.skipif(not HAS_LFM2 or device == "cpu", reason="requires LFM2 and an accelerator")
+def test_lfm2_explicit_fused_linear_cross_entropy_forward_backward():
+    from transformers.models.lfm2.modeling_lfm2 import Lfm2ForCausalLM
+
+    from liger_kernel.transformers import monkey_patch
+
+    model = Lfm2ForCausalLM(_lfm2_config()).to(device)
+    monkey_patch.apply_liger_kernel_to_lfm2(model=model, fused_linear_cross_entropy=True)
+    input_ids = torch.randint(0, model.config.vocab_size, (2, 16), device=device)
+
+    loss = model(input_ids=input_ids, labels=input_ids).loss
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert model.lm_head.weight.grad is not None
+    assert torch.isfinite(model.lm_head.weight.grad).all()
 
 
 @pytest.mark.skipif(not HAS_LFM2, reason="lfm2 module not available")
