@@ -71,6 +71,8 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
         """
         # TODO: Tune CHUNK_SIZE to fully utilize the GPU
         CHUNK_SIZE = chunk_size
+        cached_ref_chosen_logps = loss_kwargs.pop("ref_chosen_logps", None)
+        cached_ref_rejected_logps = loss_kwargs.pop("ref_rejected_logps", None)
 
         # Gradients to be accumulated
         grad_weight = torch.zeros_like(weight)
@@ -105,7 +107,14 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             **loss_kwargs,
         )
 
-        def fused_fwd_bwd(input_chunk, target_chunk, ref_input_chunk, chosen_nll_target_chunk):
+        def fused_fwd_bwd(
+            input_chunk,
+            target_chunk,
+            ref_input_chunk,
+            chosen_nll_target_chunk,
+            ref_chosen_logps_chunk,
+            ref_rejected_logps_chunk,
+        ):
             """
             Fused forward and backward pass for a chunk of input and target.
             """
@@ -117,6 +126,8 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
                     bias,
                     ref_input_chunk=ref_input_chunk,
                     chosen_nll_target_chunk=chosen_nll_target_chunk,
+                    ref_chosen_logps=ref_chosen_logps_chunk,
+                    ref_rejected_logps=ref_rejected_logps_chunk,
                 )
             else:
                 return torch.func.grad_and_value(compute_loss, argnums=(0, 1), has_aux=True)(
@@ -125,9 +136,18 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
                     target_chunk,
                     ref_input_chunk=ref_input_chunk,
                     chosen_nll_target_chunk=chosen_nll_target_chunk,
+                    ref_chosen_logps=ref_chosen_logps_chunk,
+                    ref_rejected_logps=ref_rejected_logps_chunk,
                 )
 
-        def accumulate_chunk(input_chunk, target_chunk, ref_input_chunk=None, chosen_nll_target_chunk=None):
+        def accumulate_chunk(
+            input_chunk,
+            target_chunk,
+            ref_input_chunk=None,
+            chosen_nll_target_chunk=None,
+            ref_chosen_logps_chunk=None,
+            ref_rejected_logps_chunk=None,
+        ):
             if bias is not None:
                 (
                     (chunk_grad_input, chunk_grad_weight, chunk_grad_bias),
@@ -142,7 +162,14 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
                             *aux_outputs,
                         ),
                     ),
-                ) = fused_fwd_bwd(input_chunk, target_chunk, ref_input_chunk, chosen_nll_target_chunk)
+                ) = fused_fwd_bwd(
+                    input_chunk,
+                    target_chunk,
+                    ref_input_chunk,
+                    chosen_nll_target_chunk,
+                    ref_chosen_logps_chunk,
+                    ref_rejected_logps_chunk,
+                )
                 grad_bias.add_(chunk_grad_bias)  # accumulate bias gradient
             else:
                 (
@@ -158,7 +185,14 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
                             *aux_outputs,
                         ),
                     ),
-                ) = fused_fwd_bwd(input_chunk, target_chunk, ref_input_chunk, chosen_nll_target_chunk)
+                ) = fused_fwd_bwd(
+                    input_chunk,
+                    target_chunk,
+                    ref_input_chunk,
+                    chosen_nll_target_chunk,
+                    ref_chosen_logps_chunk,
+                    ref_rejected_logps_chunk,
+                )
 
             # Accumulate gradients
             grad_weight.add_(chunk_grad_weight)
@@ -200,6 +234,16 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
         _chosen_target_chunks = torch.chunk(target[:len_chosen], chunks=chunks, dim=0)
         _rejected_input_chunks = torch.chunk(_input[len_chosen:], chunks=chunks, dim=0)
         _rejected_target_chunks = torch.chunk(target[len_chosen:], chunks=chunks, dim=0)
+        _cached_ref_chosen_logps_chunks = (
+            torch.chunk(cached_ref_chosen_logps, chunks=chunks, dim=0)
+            if cached_ref_chosen_logps is not None
+            else [None] * chunks
+        )
+        _cached_ref_rejected_logps_chunks = (
+            torch.chunk(cached_ref_rejected_logps, chunks=chunks, dim=0)
+            if cached_ref_rejected_logps is not None
+            else [None] * chunks
+        )
 
         if nll_target is not None:
             _chosen_nll_target_chunks = torch.chunk(nll_target[:len_chosen], chunks=chunks, dim=0)
@@ -216,6 +260,8 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             ref_chosen_input_chunk,
             ref_rejected_input_chunk,
             chosen_nll_target_chunk,
+            ref_chosen_logps_chunk,
+            ref_rejected_logps_chunk,
         ) in zip(
             _chosen_input_chunks,
             _rejected_input_chunks,
@@ -224,6 +270,8 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             (_ref_chosen_input_chunks if use_ref_model else [None] * len(_chosen_input_chunks)),
             (_ref_rejected_input_chunks if use_ref_model else [None] * len(_rejected_input_chunks)),
             (_chosen_nll_target_chunks if nll_target is not None else [None] * len(_chosen_input_chunks)),
+            _cached_ref_chosen_logps_chunks,
+            _cached_ref_rejected_logps_chunks,
         ):
             input_chunk = torch.cat([chosen_input_chunk, rejected_input_chunk], dim=0)
             ref_input_chunk = (
@@ -239,7 +287,14 @@ class LigerFusedLinearPreferenceBase(torch.autograd.Function):
             torch._dynamo.mark_dynamic(chosen_nll_target_chunk, 1) if nll_target is not None else None
 
             # accumulate loss, gradients, and metrics
-            accumulate_chunk(input_chunk, target_chunk, ref_input_chunk, chosen_nll_target_chunk)
+            accumulate_chunk(
+                input_chunk,
+                target_chunk,
+                ref_input_chunk,
+                chosen_nll_target_chunk,
+                ref_chosen_logps_chunk,
+                ref_rejected_logps_chunk,
+            )
 
         # combine grad_chosen_inputs and grad_rejected_inputs
         grad_inputs = grad_chosen_inputs + grad_rejected_inputs
