@@ -255,7 +255,7 @@ class _LigerCachedReferenceDPOFunction(LigerFusedLinearDPOFunction):
             ignore_index,
             beta,
             compute_nll_loss,
-            compiled,
+            _compiled,
             average_log_prob,
             chunk_size,
             loss_type,
@@ -263,6 +263,8 @@ class _LigerCachedReferenceDPOFunction(LigerFusedLinearDPOFunction):
             discopop_tau,
             alpha,
         ) = settings
+        # torch.compile cannot trace a Triton custom-autograd backward nested under torch.func.grad.
+        # Keep this rare bounded-memory path eager; the native small-shape fast path remains compiled.
         return LigerFusedLinearPreferenceBase.forward(
             cls=cls,
             ctx=ctx,
@@ -274,7 +276,7 @@ class _LigerCachedReferenceDPOFunction(LigerFusedLinearDPOFunction):
             beta=beta,
             alpha=alpha,
             compute_nll_loss=compute_nll_loss,
-            compiled=compiled,
+            compiled=False,
             use_ref_model=False,
             average_log_prob=average_log_prob,
             chunk_size=chunk_size,
