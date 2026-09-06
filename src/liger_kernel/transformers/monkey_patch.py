@@ -39,7 +39,6 @@ from liger_kernel.transformers.rms_norm import LigerRMSNorm
 from liger_kernel.transformers.rms_norm import LigerRMSNormForMuseGlimmer
 from liger_kernel.transformers.rms_norm import LigerRMSNormForMuseGlimmerTextCentered
 from liger_kernel.transformers.rope import liger_lfm2_rotary_pos_emb
-
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from liger_kernel.transformers.rope import liger_rotary_pos_emb_vision
 from liger_kernel.transformers.swiglu import LigerBlockSparseTop2MLP
