@@ -383,9 +383,14 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
                 "provide either precomputed reference log-probs or reference model inputs and weights, not both"
             )
 
+        use_native = (has_precomputed_ref or self.loss_type == "sigmoid") and _should_use_native_dpo(
+            _input, lin_weight, use_ref_model=self.use_ref_model and not has_precomputed_ref
+        )
+
         # ZeRO-3 re-shards direct-access LM-head parameters as soon as the caller's gather context exits.
-        # Compute and stash gradients inside that context, as the established chunked custom-autograd path does.
-        if has_precomputed_ref and _is_zero3_parameter(lin_weight):
+        # Compute and stash gradients inside that context. The same bounded path protects large cached-reference
+        # workloads on every backend once materialized policy logits cross the measured dispatch threshold.
+        if has_precomputed_ref and (_is_zero3_parameter(lin_weight) or not use_native):
             settings = (
                 self.ignore_index,
                 self.beta,
@@ -408,12 +413,8 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
                 settings,
             )
 
-        # Optimization: native autograd has lower fixed overhead and no memory disadvantage for small
-        # logits workloads. Precomputed references also use this path: with no reference logits alive at the
-        # same time, it retains the principal memory benefit while avoiding compiled/chunked overhead.
-        if has_precomputed_ref or (
-            self.loss_type == "sigmoid" and _should_use_native_dpo(_input, lin_weight, use_ref_model=self.use_ref_model)
-        ):
+        # Native autograd has lower fixed overhead and no memory disadvantage below the measured crossover.
+        if use_native:
             loss, outputs = LigerFusedLinearPreferenceBase._compute_loss(
                 _input,
                 lin_weight,
