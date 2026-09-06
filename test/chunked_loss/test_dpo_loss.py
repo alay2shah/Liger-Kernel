@@ -1575,7 +1575,7 @@ def test_precomputed_reference_logps_parity(loss_type, average_log_prob, zero3_p
             ref_logps = ref_logps / valid.sum(dim=-1)
         ref_chosen_logps, ref_rejected_logps = ref_logps.chunk(2)
 
-    loss_fn = LigerFusedLinearDPOLoss(compiled=False, average_log_prob=average_log_prob, loss_type=loss_type)
+    loss_fn = LigerFusedLinearDPOLoss(average_log_prob=average_log_prob, loss_type=loss_type)
     loss_with_ref, outputs_with_ref = loss_fn(
         weight_with_ref,
         input_with_ref,
