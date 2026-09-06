@@ -320,10 +320,21 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
         ref_input=None,
         ref_weight=None,
         ref_bias=None,
+        ref_chosen_logps=None,
+        ref_rejected_logps=None,
     ):
+        has_precomputed_ref = ref_chosen_logps is not None or ref_rejected_logps is not None
+        if (ref_chosen_logps is None) != (ref_rejected_logps is None):
+            raise ValueError("ref_chosen_logps and ref_rejected_logps must be provided together")
+        if has_precomputed_ref and any(value is not None for value in (ref_input, ref_weight, ref_bias)):
+            raise ValueError(
+                "provide either precomputed reference log-probs or reference model inputs and weights, not both"
+            )
+
         # Optimization: native autograd has lower fixed overhead and no memory disadvantage for small
-        # logits workloads. Large workloads retain chunking so the full logits graph is never materialized.
-        if self.loss_type == "sigmoid" and _should_use_native_dpo(_input, lin_weight):
+        # logits workloads. Precomputed references also use this path: with no reference logits alive at the
+        # same time, it retains the principal memory benefit while avoiding compiled/chunked overhead.
+        if has_precomputed_ref or (self.loss_type == "sigmoid" and _should_use_native_dpo(_input, lin_weight)):
             loss, outputs = LigerFusedLinearPreferenceBase._compute_loss(
                 _input,
                 lin_weight,
@@ -335,7 +346,7 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
                 alpha=self.alpha,
                 beta=self.beta,
                 compute_nll_loss=self.compute_nll_loss,
-                use_ref_model=self.use_ref_model,
+                use_ref_model=self.use_ref_model and not has_precomputed_ref,
                 ref_input_chunk=ref_input,
                 ref_weight=ref_weight,
                 ref_bias=ref_bias,
@@ -347,6 +358,8 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
                 loss_type=self.loss_type,
                 label_smoothing=self.label_smoothing,
                 discopop_tau=self.discopop_tau,
+                ref_chosen_logps=ref_chosen_logps,
+                ref_rejected_logps=ref_rejected_logps,
             )
             # Match the established native/reference contract: mean-logit metrics are logging-only and
             # must not retain the full logits graph, while loss-relevant logps, NLL, and rewards remain live.

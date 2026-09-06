@@ -1533,3 +1533,90 @@ def test_shape_aware_native_and_chunked_paths_match(monkeypatch):
     assert_verbose_allclose(native[2], chunked[2], atol=1e-5, rtol=1e-4)
     assert_verbose_allclose(native[3], chunked[3], atol=1e-5, rtol=1e-4)
     assert_verbose_allclose(native[4], chunked[4], atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.parametrize("loss_type", ["sigmoid", "apo_zero"])
+@pytest.mark.parametrize("average_log_prob", [False, True])
+def test_precomputed_reference_logps_parity(loss_type, average_log_prob):
+    """Cached reference log-probs must exactly replace the reference LM-head computation."""
+    B, T, H, V = 4, 7, 11, 29
+    ignore_index = -100
+    policy_input = torch.randn(B, T, H, device=device)
+    input_with_ref = policy_input.detach().clone().requires_grad_(True)
+    input_with_cache = policy_input.detach().clone().requires_grad_(True)
+    policy_weight = torch.randn(V, H, device=device)
+    weight_with_ref = policy_weight.detach().clone().requires_grad_(True)
+    weight_with_cache = policy_weight.detach().clone().requires_grad_(True)
+    policy_bias = torch.randn(V, device=device)
+    bias_with_ref = policy_bias.detach().clone().requires_grad_(True)
+    bias_with_cache = policy_bias.detach().clone().requires_grad_(True)
+
+    ref_input = torch.randn(B, T, H, device=device)
+    ref_weight = torch.randn(V, H, device=device)
+    ref_bias = torch.randn(V, device=device)
+    target = torch.randint(0, V, (B, T), device=device)
+    target[0, :2] = ignore_index
+    target[3, -1] = ignore_index
+
+    with torch.no_grad():
+        ref_logits = F.linear(ref_input, ref_weight, ref_bias)
+        valid = target != ignore_index
+        safe_target = target.masked_fill(~valid, 0)
+        ref_token_logps = torch.gather(F.log_softmax(ref_logits, dim=-1), -1, safe_target.unsqueeze(-1)).squeeze(-1)
+        ref_token_logps = ref_token_logps.masked_fill(~valid, 0.0)
+        ref_logps = ref_token_logps.sum(dim=-1)
+        if average_log_prob:
+            ref_logps = ref_logps / valid.sum(dim=-1)
+        ref_chosen_logps, ref_rejected_logps = ref_logps.chunk(2)
+
+    loss_fn = LigerFusedLinearDPOLoss(compiled=False, average_log_prob=average_log_prob, loss_type=loss_type)
+    loss_with_ref, outputs_with_ref = loss_fn(
+        weight_with_ref,
+        input_with_ref,
+        target,
+        bias_with_ref,
+        ref_input,
+        ref_weight,
+        ref_bias,
+    )
+    loss_with_cache, outputs_with_cache = loss_fn(
+        weight_with_cache,
+        input_with_cache,
+        target,
+        bias_with_cache,
+        ref_chosen_logps=ref_chosen_logps,
+        ref_rejected_logps=ref_rejected_logps,
+    )
+
+    assert_verbose_allclose(loss_with_ref, loss_with_cache, atol=1e-5, rtol=5e-4)
+    for output_with_ref, output_with_cache in zip(outputs_with_ref, outputs_with_cache):
+        assert_verbose_allclose(output_with_ref, output_with_cache, atol=1e-5, rtol=5e-4)
+
+    loss_with_ref.backward()
+    loss_with_cache.backward()
+    assert_verbose_allclose(input_with_ref.grad, input_with_cache.grad, atol=1e-5, rtol=5e-4)
+    assert_verbose_allclose(weight_with_ref.grad, weight_with_cache.grad, atol=1e-5, rtol=5e-4)
+    assert_verbose_allclose(bias_with_ref.grad, bias_with_cache.grad, atol=1e-5, rtol=5e-4)
+
+
+def test_precomputed_reference_logps_validation():
+    B, T, H, V = 4, 3, 5, 7
+    policy_input = torch.randn(B, T, H, device=device)
+    policy_weight = torch.randn(V, H, device=device)
+    target = torch.randint(0, V, (B, T), device=device)
+    cached_logps = torch.randn(B // 2, device=device)
+    loss_fn = LigerFusedLinearDPOLoss(compiled=False)
+
+    with pytest.raises(ValueError, match="must be provided together"):
+        loss_fn(policy_weight, policy_input, target, ref_chosen_logps=cached_logps)
+
+    with pytest.raises(ValueError, match="either precomputed reference log-probs or reference model"):
+        loss_fn(
+            policy_weight,
+            policy_input,
+            target,
+            ref_input=policy_input,
+            ref_weight=policy_weight,
+            ref_chosen_logps=cached_logps,
+            ref_rejected_logps=cached_logps,
+        )
