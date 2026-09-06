@@ -1541,8 +1541,9 @@ def test_shape_aware_native_and_chunked_paths_match(monkeypatch):
 @pytest.mark.parametrize("loss_type", ["sigmoid", "apo_zero"])
 @pytest.mark.parametrize("average_log_prob", [False, True])
 @pytest.mark.parametrize("zero3_parameter", [False, True])
-def test_precomputed_reference_logps_parity(loss_type, average_log_prob, zero3_parameter):
+def test_precomputed_reference_logps_parity(loss_type, average_log_prob, zero3_parameter, monkeypatch):
     """Cached reference log-probs must exactly replace the reference LM-head computation."""
+    monkeypatch.setattr(dpo_loss_module, "_should_use_native_dpo", lambda *_args, **_kwargs: True)
     B, T, H, V = 4, 7, 11, 29
     ignore_index = -100
     policy_input = torch.randn(B, T, H, device=device)
