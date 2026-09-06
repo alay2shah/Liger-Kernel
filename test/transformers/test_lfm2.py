@@ -305,7 +305,7 @@ def test_lfm2_hopper_native_forward_boundary(monkeypatch):
 
     monkeypatch.setattr(lfm2_utils.torch.version, "hip", None)
     monkeypatch.setattr(lfm2_utils, "infer_device_arch", lambda _device_id: "hopper")
-    for operation, cutoff in (("rms_norm", 1536), ("rope", 1536), ("short_conv", 4096), ("swiglu", 4096)):
+    for operation, cutoff in (("rms_norm", 2048), ("rope", 4096), ("short_conv", 4096), ("swiglu", 4096)):
         assert use_lfm2_native_forward(Tensor(cutoff - 1), operation=operation, sequence_dim=1)
         assert not use_lfm2_native_forward(Tensor(cutoff), operation=operation, sequence_dim=1)
 

@@ -9,11 +9,17 @@ from liger_kernel.chunked_loss.fused_linear_preference import LigerFusedLinearPr
 _NATIVE_DPO_MAX_LOGIT_ELEMENTS = 268_435_456
 
 
-def _should_use_native_dpo(_input, weight):
+def _should_use_native_dpo(_input, weight, use_ref_model=False):
     if _input.dtype not in (torch.float16, torch.bfloat16):
         return False
-    total_logit_elements = (_input.numel() // _input.shape[-1]) * weight.shape[0]
+    projection_count = 2 if use_ref_model else 1
+    total_logit_elements = (_input.numel() // _input.shape[-1]) * weight.shape[0] * projection_count
     return total_logit_elements <= _NATIVE_DPO_MAX_LOGIT_ELEMENTS
+
+
+def _is_zero3_parameter(weight):
+    """Return whether ``weight`` is managed by DeepSpeed ZeRO-3."""
+    return hasattr(weight, "ds_id")
 
 
 class LigerFusedLinearDPOFunction(LigerFusedLinearPreferenceBase):
@@ -240,6 +246,50 @@ class LigerFusedLinearDPOFunction(LigerFusedLinearPreferenceBase):
         return *grads, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
 
+class _LigerCachedReferenceDPOFunction(LigerFusedLinearDPOFunction):
+    """Compute and stash cached-reference gradients while ZeRO-3 has gathered the LM head."""
+
+    @classmethod
+    def forward(cls, ctx, _input, weight, target, bias, ref_chosen_logps, ref_rejected_logps, settings):
+        (
+            ignore_index,
+            beta,
+            compute_nll_loss,
+            compiled,
+            average_log_prob,
+            loss_type,
+            label_smoothing,
+            discopop_tau,
+            alpha,
+        ) = settings
+        return LigerFusedLinearPreferenceBase.forward(
+            cls=cls,
+            ctx=ctx,
+            _input=_input,
+            weight=weight,
+            target=target,
+            bias=bias,
+            ignore_index=ignore_index,
+            beta=beta,
+            alpha=alpha,
+            compute_nll_loss=compute_nll_loss,
+            compiled=compiled,
+            use_ref_model=False,
+            average_log_prob=average_log_prob,
+            chunk_size=max(1, target.shape[0] // 2),
+            loss_type=loss_type,
+            label_smoothing=label_smoothing,
+            discopop_tau=discopop_tau,
+            ref_chosen_logps=ref_chosen_logps,
+            ref_rejected_logps=ref_rejected_logps,
+        )
+
+    @staticmethod
+    def backward(ctx, *grad_output):
+        grads = LigerFusedLinearPreferenceBase.backward(ctx, grad_output)[:4]
+        return *grads, None, None, None
+
+
 class LigerFusedLinearDPOLoss(torch.nn.Module):
     """
     Fused linear layer with DPO loss.
@@ -331,10 +381,36 @@ class LigerFusedLinearDPOLoss(torch.nn.Module):
                 "provide either precomputed reference log-probs or reference model inputs and weights, not both"
             )
 
+        # ZeRO-3 re-shards direct-access LM-head parameters as soon as the caller's gather context exits.
+        # Compute and stash gradients inside that context, as the established chunked custom-autograd path does.
+        if has_precomputed_ref and _is_zero3_parameter(lin_weight):
+            settings = (
+                self.ignore_index,
+                self.beta,
+                self.compute_nll_loss,
+                self.compiled,
+                self.average_log_prob,
+                self.loss_type,
+                self.label_smoothing,
+                self.discopop_tau,
+                self.alpha,
+            )
+            return _LigerCachedReferenceDPOFunction.apply(
+                _input,
+                lin_weight,
+                target,
+                bias,
+                ref_chosen_logps,
+                ref_rejected_logps,
+                settings,
+            )
+
         # Optimization: native autograd has lower fixed overhead and no memory disadvantage for small
         # logits workloads. Precomputed references also use this path: with no reference logits alive at the
         # same time, it retains the principal memory benefit while avoiding compiled/chunked overhead.
-        if has_precomputed_ref or (self.loss_type == "sigmoid" and _should_use_native_dpo(_input, lin_weight)):
+        if has_precomputed_ref or (
+            self.loss_type == "sigmoid" and _should_use_native_dpo(_input, lin_weight, use_ref_model=self.use_ref_model)
+        ):
             loss, outputs = LigerFusedLinearPreferenceBase._compute_loss(
                 _input,
                 lin_weight,

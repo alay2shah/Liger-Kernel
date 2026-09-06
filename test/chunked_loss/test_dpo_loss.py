@@ -1455,11 +1455,14 @@ def test_label_smoothing_validation():
 
 
 def test_shape_aware_dispatch_boundary():
-    """Dispatch uses total logits elements and includes the measured 268M boundary."""
+    """Dispatch counts every live logits projection at the measured 268M boundary."""
     weight = torch.empty((65536, 1), device="meta", dtype=torch.bfloat16)
 
     assert dpo_loss_module._should_use_native_dpo(
         torch.empty((2, 2048, 1), device="meta", dtype=torch.bfloat16), weight
+    )
+    assert not dpo_loss_module._should_use_native_dpo(
+        torch.empty((2, 2048, 1), device="meta", dtype=torch.bfloat16), weight, use_ref_model=True
     )
     assert not dpo_loss_module._should_use_native_dpo(
         torch.empty((2, 2049, 1), device="meta", dtype=torch.bfloat16), weight
@@ -1491,7 +1494,7 @@ def test_shape_aware_native_and_chunked_paths_match(monkeypatch):
         monkeypatch.setattr(
             dpo_loss_module,
             "_should_use_native_dpo",
-            lambda _input, weight: use_native,
+            lambda _input, weight, **_kwargs: use_native,
         )
         _input = base_input.detach().clone().requires_grad_(True)
         weight = base_weight.detach().clone().requires_grad_(True)
@@ -1537,7 +1540,8 @@ def test_shape_aware_native_and_chunked_paths_match(monkeypatch):
 
 @pytest.mark.parametrize("loss_type", ["sigmoid", "apo_zero"])
 @pytest.mark.parametrize("average_log_prob", [False, True])
-def test_precomputed_reference_logps_parity(loss_type, average_log_prob):
+@pytest.mark.parametrize("zero3_parameter", [False, True])
+def test_precomputed_reference_logps_parity(loss_type, average_log_prob, zero3_parameter):
     """Cached reference log-probs must exactly replace the reference LM-head computation."""
     B, T, H, V = 4, 7, 11, 29
     ignore_index = -100
@@ -1547,6 +1551,8 @@ def test_precomputed_reference_logps_parity(loss_type, average_log_prob):
     policy_weight = torch.randn(V, H, device=device)
     weight_with_ref = policy_weight.detach().clone().requires_grad_(True)
     weight_with_cache = policy_weight.detach().clone().requires_grad_(True)
+    if zero3_parameter:
+        weight_with_cache.ds_id = 0
     policy_bias = torch.randn(V, device=device)
     bias_with_ref = policy_bias.detach().clone().requires_grad_(True)
     bias_with_cache = policy_bias.detach().clone().requires_grad_(True)

@@ -5,8 +5,8 @@ from liger_kernel.utils import infer_device_arch
 # Correctly-autocast H100 end-to-end sweeps show different crossovers for
 # pointwise and sequence kernels. All Liger paths remain selected at 4K+.
 _HOPPER_NATIVE_SEQUENCE_CUTOFFS = {
-    "rms_norm": 1536,
-    "rope": 1536,
+    "rms_norm": 2048,
+    "rope": 4096,
     "short_conv": 4096,
     "swiglu": 4096,
 }
