@@ -1,11 +1,13 @@
 import inspect
 import logging
+import os
 
 from functools import partial
 from types import MethodType
 from typing import Callable
 from typing import Optional
 
+import torch
 import transformers
 
 from packaging import version
@@ -3842,22 +3844,47 @@ def apply_liger_kernel_to_lfm2_moe(
         )
 
 
+def _use_lfm2_vl_native_defaults() -> bool:
+    """Use native defaults for distributed H100 LFM2-VL training."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+    else:
+        try:
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        except ValueError:
+            world_size = 1
+    if world_size < 2 or not torch.cuda.is_available() or torch.version.hip is not None:
+        return False
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    return properties.major == 9 and properties.minor == 0 and "H100" in properties.name.upper()
+
+
 def apply_liger_kernel_to_lfm2_vl(
-    rope: bool = True,
+    rope: Optional[bool] = None,
     cross_entropy: bool = False,
-    fused_linear_cross_entropy: bool = True,
+    fused_linear_cross_entropy: Optional[bool] = None,
     layer_norm: Optional[bool] = None,
-    rms_norm: bool = True,
-    swiglu: bool = True,
-    short_conv: bool = True,
+    rms_norm: Optional[bool] = None,
+    swiglu: Optional[bool] = None,
+    short_conv: Optional[bool] = None,
     model: PreTrainedModel = None,
 ) -> None:
     """Apply Liger kernels to LFM2-VL's LFM2 decoder and SigLIP2 tower.
 
     LayerNorm defaults to disabled because PyTorch's implementation is faster
     for the SigLIP2 shapes on both CUDA and ROCm. Pass ``layer_norm=True`` to
-    opt in explicitly.
+    opt in explicitly. The remaining kernels default to disabled for
+    distributed H100 training, where end-to-end LFM2-VL benchmarks favor the
+    native implementations. Explicit kernel options always take precedence.
     """
+    native_defaults = _use_lfm2_vl_native_defaults()
+    rope = not native_defaults if rope is None else rope
+    fused_linear_cross_entropy = (
+        not native_defaults if fused_linear_cross_entropy is None else fused_linear_cross_entropy
+    )
+    rms_norm = not native_defaults if rms_norm is None else rms_norm
+    swiglu = not native_defaults if swiglu is None else swiglu
+    short_conv = not native_defaults if short_conv is None else short_conv
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )

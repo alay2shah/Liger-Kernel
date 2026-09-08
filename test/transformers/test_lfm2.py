@@ -53,6 +53,69 @@ def _lfm2_config(**overrides):
     return Lfm2Config(**config)
 
 
+@pytest.mark.parametrize(
+    ("world_size", "cuda_available", "hip_version", "device_name", "expected"),
+    [
+        (1, True, None, "NVIDIA H100 80GB HBM3", False),
+        (2, True, None, "NVIDIA H100 80GB HBM3", True),
+        (2, True, None, "NVIDIA H200", False),
+        (2, True, "6.3", "AMD Instinct MI300X", False),
+        (2, False, None, "NVIDIA H100 80GB HBM3", False),
+    ],
+)
+def test_lfm2_vl_native_defaults(monkeypatch, world_size, cuda_available, hip_version, device_name, expected):
+    from liger_kernel.transformers import monkey_patch
+
+    class DeviceProperties:
+        major = 9
+        minor = 0
+        name = device_name
+
+    monkeypatch.setenv("WORLD_SIZE", str(world_size))
+    monkeypatch.setattr(monkey_patch.torch.distributed, "is_available", lambda: False)
+    monkeypatch.setattr(monkey_patch.torch.cuda, "is_available", lambda: cuda_available)
+    monkeypatch.setattr(monkey_patch.torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(monkey_patch.torch.cuda, "get_device_properties", lambda _device: DeviceProperties())
+    monkeypatch.setattr(monkey_patch.torch.version, "hip", hip_version)
+
+    assert monkey_patch._use_lfm2_vl_native_defaults() is expected
+
+
+@pytest.mark.skipif(not HAS_LFM2_VL, reason="lfm2_vl module not available")
+def test_lfm2_vl_distributed_h100_defaults_and_overrides(monkeypatch):
+    from liger_kernel.transformers import monkey_patch
+
+    calls = []
+    monkeypatch.setattr(monkey_patch, "_use_lfm2_vl_native_defaults", lambda: True)
+    monkeypatch.setattr(monkey_patch, "apply_liger_kernel_to_lfm2", lambda **kwargs: calls.append(kwargs))
+
+    monkey_patch.apply_liger_kernel_to_lfm2_vl()
+    assert calls[-1] == {
+        "rope": False,
+        "cross_entropy": False,
+        "fused_linear_cross_entropy": False,
+        "rms_norm": False,
+        "swiglu": False,
+        "short_conv": False,
+    }
+
+    monkey_patch.apply_liger_kernel_to_lfm2_vl(
+        rope=True,
+        fused_linear_cross_entropy=False,
+        rms_norm=True,
+        swiglu=True,
+        short_conv=True,
+    )
+    assert calls[-1] == {
+        "rope": True,
+        "cross_entropy": False,
+        "fused_linear_cross_entropy": False,
+        "rms_norm": True,
+        "swiglu": True,
+        "short_conv": True,
+    }
+
+
 @pytest.mark.skipif(not HAS_LFM2, reason="lfm2 module not available")
 def test_apply_liger_kernel_to_lfm2_instance():
     from transformers.models.lfm2 import modeling_lfm2
