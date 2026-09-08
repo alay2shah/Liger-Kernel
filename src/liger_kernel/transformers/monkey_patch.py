@@ -3844,8 +3844,8 @@ def apply_liger_kernel_to_lfm2_moe(
         )
 
 
-def _use_lfm2_vl_native_defaults() -> bool:
-    """Use native defaults for distributed H100 LFM2-VL training."""
+def _use_lfm2_vl_selective_defaults() -> bool:
+    """Use shape-validated selective defaults for distributed H100 LFM2-VL training."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         world_size = torch.distributed.get_world_size()
     else:
@@ -3873,18 +3873,17 @@ def apply_liger_kernel_to_lfm2_vl(
 
     LayerNorm defaults to disabled because PyTorch's implementation is faster
     for the SigLIP2 shapes on both CUDA and ROCm. Pass ``layer_norm=True`` to
-    opt in explicitly. The remaining kernels default to disabled for
-    distributed H100 training, where end-to-end LFM2-VL benchmarks favor the
-    native implementations. Explicit kernel options always take precedence.
+    opt in explicitly. Distributed H100 training defaults to the shape-validated
+    combination of Liger RMSNorm, short convolution, and fused linear cross
+    entropy while retaining native RoPE and SwiGLU. Explicit kernel options
+    always take precedence.
     """
-    native_defaults = _use_lfm2_vl_native_defaults()
-    rope = not native_defaults if rope is None else rope
-    fused_linear_cross_entropy = (
-        not native_defaults if fused_linear_cross_entropy is None else fused_linear_cross_entropy
-    )
-    rms_norm = not native_defaults if rms_norm is None else rms_norm
-    swiglu = not native_defaults if swiglu is None else swiglu
-    short_conv = not native_defaults if short_conv is None else short_conv
+    selective_defaults = _use_lfm2_vl_selective_defaults()
+    rope = not selective_defaults if rope is None else rope
+    fused_linear_cross_entropy = True if fused_linear_cross_entropy is None else fused_linear_cross_entropy
+    rms_norm = True if rms_norm is None else rms_norm
+    swiglu = not selective_defaults if swiglu is None else swiglu
+    short_conv = True if short_conv is None else short_conv
     assert not (cross_entropy and fused_linear_cross_entropy), (
         "cross_entropy and fused_linear_cross_entropy cannot both be True."
     )
