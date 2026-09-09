@@ -612,7 +612,11 @@ def _layer_norm_cutedsl_forward(
     """
     shape = x.shape
     N = shape[-1]
-    x_flat = x.view(-1, N).contiguous()
+    # SigLIP2 can hand us a non-contiguous sequence-major view. ``view``
+    # rejects that layout even though the last dimension is the normalized
+    # feature axis; reshape preserves the fast view case and copies only when
+    # the input strides require it.
+    x_flat = x.reshape(-1, N).contiguous()
 
     # The forward and backward kernels load weight/bias in their native dtype
     # and promote to fp32 in-register (``tXrW.load().to(Float32)``), so the old

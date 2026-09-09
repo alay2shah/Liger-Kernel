@@ -179,6 +179,31 @@ def test_layer_norm_available_backends_includes_triton():
     assert any(b in ("triton", "nvidia-triton") for b in impls), f"expected 'triton' / 'nvidia-triton' in {impls}"
 
 
+def test_layer_norm_cutedsl_accepts_noncontiguous_input():
+    """SigLIP2's projector can pass a non-contiguous sequence-major view."""
+    backend = next((b for b in _REGISTERED_BACKENDS if b in ("nvidia-cutedsl", "cutedsl")), None)
+    if backend is None or not torch.cuda.is_available():
+        pytest.skip("cuTeDSL LayerNorm backend is unavailable")
+
+    M, N = 1024, 768
+    base = torch.randn(N, M, device="cuda", dtype=torch.bfloat16)
+    x = base.transpose(0, 1).detach().requires_grad_(True)
+    weight = torch.randn(N, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    bias = torch.randn(N, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+
+    y = dispatch("layer_norm", x, weight, bias, 1e-6, backend=backend)
+    y.sum().backward()
+
+    x_ref = x.detach().float().requires_grad_(True)
+    weight_ref = weight.detach().float().requires_grad_(True)
+    bias_ref = bias.detach().float().requires_grad_(True)
+    y_ref = torch.nn.functional.layer_norm(x_ref, (N,), weight_ref, bias_ref, 1e-6)
+    y_ref.sum().backward()
+
+    assert torch.allclose(y.float(), y_ref, atol=2e-2, rtol=2e-2)
+    assert torch.allclose(x.grad.float(), x_ref.grad, atol=1e-1, rtol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # Explicit-mode coverage for the cuTile LayerNorm kernel. LayerNorm has only
 # one casting model (fp32 reduction); cuTile registers 3 modes:
