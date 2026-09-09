@@ -75,8 +75,17 @@ def LigerForCausalLMLoss(
     final_logit_softcapping: Optional[float] = None,
     return_token_accuracy: bool = False,
     return_predicted_tokens: bool = False,
+    sparse_row: bool = False,
     **kwargs,
 ):
+    """Compute causal-LM loss without materializing vocabulary logits.
+
+    ``sparse_row`` is an opt-in path for multimodal batches whose labels mask
+    most sequence positions (for example, image tokens). It compacts hidden
+    states and targets before entering the fused CE kernel, so the kernel only
+    performs the vocabulary projection for supervised rows. The default stays
+    on the existing dense-row path for compatibility and dense workloads.
+    """
     # Filter out inapplicable kwargs to liger_fused_linear_cross_entropy
     applicable_params = inspect.signature(F.liger_fused_linear_cross_entropy).parameters
     kwargs = {k: v for k, v in kwargs.items() if k in applicable_params}
@@ -92,6 +101,13 @@ def LigerForCausalLMLoss(
     shift_labels = shift_labels.view(-1)
     # Enable model parallelism
     shift_labels = shift_labels.to(hidden_states.device)
+    if sparse_row:
+        valid_rows = shift_labels != ignore_index
+        # Preserve the established all-masked reduction semantics and avoid
+        # passing a zero-row matrix to backend implementations that reject it.
+        if bool(valid_rows.any()):
+            hidden_states = hidden_states[valid_rows]
+            shift_labels = shift_labels[valid_rows]
     result = fixed_fused_linear_cross_entropy(
         hidden_states,
         lm_head_weight,

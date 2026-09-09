@@ -3867,15 +3867,18 @@ def apply_liger_kernel_to_lfm2_vl(
     rms_norm: Optional[bool] = None,
     swiglu: Optional[bool] = None,
     short_conv: Optional[bool] = None,
+    sparse_row: bool = False,
     model: PreTrainedModel = None,
 ) -> None:
     """Apply Liger kernels to LFM2-VL's LFM2 decoder and SigLIP2 tower.
 
     LayerNorm defaults to disabled because PyTorch's implementation is faster
     for the SigLIP2 shapes on both CUDA and ROCm. Pass ``layer_norm=True`` to
-    opt in explicitly. Distributed H100 training defaults to the shape-validated
-    combination of Liger RMSNorm, short convolution, and fused linear cross
-    entropy while retaining native RoPE and SwiGLU. Explicit kernel options
+    opt in explicitly. ``sparse_row=True`` is an opt-in experiment that compacts
+    ignored-label rows before fused CE; it is disabled by default because the
+    indexing overhead can outweigh the projection savings. Distributed H100 training
+    defaults to the shape-validated combination of Liger RMSNorm, short convolution,
+    and fused linear cross entropy while retaining native RoPE and SwiGLU. Explicit kernel options
     always take precedence.
     """
     selective_defaults = _use_lfm2_vl_selective_defaults()
@@ -3915,8 +3918,13 @@ def apply_liger_kernel_to_lfm2_vl(
         nn.functional.cross_entropy = liger_cross_entropy
     if fused_linear_cross_entropy:
         if model is not None:
+            model._liger_sparse_row_ce = sparse_row
             model.forward = MethodType(lfm2_vl_lce_forward, model)
         else:
+            # AutoLigerKernel patches the class before model construction. A
+            # class attribute carries the opt-in through that path while an
+            # instance attribute above handles already-loaded models.
+            Lfm2VlForConditionalGeneration._liger_sparse_row_ce = sparse_row
             modeling_lfm2_vl.Lfm2VlForConditionalGeneration.forward = lfm2_vl_lce_forward
 
     if model is not None:

@@ -60,12 +60,14 @@ def lce_forward(
     token_accuracy = None
     predicted_tokens = None
     if skip_logits:
+        sparse_row = getattr(self, "_liger_sparse_row_ce", False)
         result = LigerForCausalLMLoss(
             hidden_states=kept_hidden_states,
             lm_head_weight=self.lm_head.weight,
             labels=labels,
             shift_labels=shift_labels,
             hidden_size=self.config.text_config.hidden_size,
+            sparse_row=sparse_row,
             **kwargs,
         )
         loss, _, token_accuracy, predicted_tokens = unpack_cross_entropy_result(result)

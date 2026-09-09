@@ -225,6 +225,8 @@ def test_apply_liger_kernel_to_lfm2_vl_instance(layer_norm, expected_liger_layer
     model = Lfm2VlForConditionalGeneration(config)
     monkey_patch.apply_liger_kernel_to_lfm2_vl(model=model, layer_norm=layer_norm)
 
+    assert model._liger_sparse_row_ce is False
+
     expected_forward = inspect.getsource(lfm2_vl_lce_forward)
     assert inspect.getsource(model.forward) == expected_forward
     language_model = model.model.language_model
@@ -486,3 +488,61 @@ def test_auto_liger_kernel_for_lfm2_moe_from_config():
         assert inspect.getsource(sparse_layer.feed_forward.gate.forward) == inspect.getsource(
             liger_lfm2_moe_router_forward
         )
+
+
+def test_lfm2_vl_sparse_row_ce_compacts_supervised_rows(monkeypatch):
+    """The opt-in path sends only non-ignored causal rows to the fused CE op."""
+    from liger_kernel.transformers.model import loss_utils
+
+    captured = {}
+
+    def fake_fused_linear_cross_entropy(
+        hidden_states, lm_head_weight, target, num_items_in_batch=None, *args, **kwargs
+    ):
+        captured["hidden_states"] = hidden_states
+        captured["target"] = target
+        captured["num_items_in_batch"] = num_items_in_batch
+        return hidden_states.sum() / num_items_in_batch
+
+    monkeypatch.setattr(loss_utils, "fixed_fused_linear_cross_entropy", fake_fused_linear_cross_entropy)
+    hidden_states = torch.randn(2, 4, 3, requires_grad=True)
+    labels = torch.tensor([[10, -100, 20, 30], [40, -100, -100, 50]])
+
+    loss = loss_utils.LigerForCausalLMLoss(
+        hidden_states=hidden_states,
+        lm_head_weight=torch.randn(17, 3),
+        labels=labels,
+        hidden_size=3,
+        num_items_in_batch=3,
+        sparse_row=True,
+    )
+    loss.backward()
+
+    assert captured["hidden_states"].shape == (3, 3)
+    assert captured["target"].tolist() == [20, 30, 50]
+    assert captured["num_items_in_batch"] == 3
+    grad = hidden_states.grad.view(-1, 3)
+    assert torch.equal(torch.nonzero(grad.abs().sum(dim=-1)).flatten(), torch.tensor([1, 2, 6]))
+
+
+def test_lfm2_vl_sparse_row_ce_preserves_all_ignored_fallback(monkeypatch):
+    from liger_kernel.transformers.model import loss_utils
+
+    seen = []
+
+    def fake_fused_linear_cross_entropy(hidden_states, lm_head_weight, target, *args, **kwargs):
+        seen.append((hidden_states.shape[0], target.shape[0]))
+        return hidden_states.sum()
+
+    monkeypatch.setattr(loss_utils, "fixed_fused_linear_cross_entropy", fake_fused_linear_cross_entropy)
+    hidden_states = torch.randn(2, 4, 3)
+    labels = torch.full((2, 4), -100)
+    loss_utils.LigerForCausalLMLoss(
+        hidden_states=hidden_states,
+        lm_head_weight=torch.randn(17, 3),
+        labels=labels,
+        hidden_size=3,
+        sparse_row=True,
+    )
+
+    assert seen == [(8, 8)]
